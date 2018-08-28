@@ -73,13 +73,17 @@ public class DBrush implements DStruct {
         return contents.contains(BrushFlag.CONTENTS_WINDOW);
     }
 
+    //TODO: CSGO only?
+    public boolean isGrenadeClip() {
+        return contents.contains(BrushFlag.CONTENTS_CURRENT_90);
+    }
+  
     public void flagAsOccluder(boolean value) {
         flagOccluder = value;
     }
     public boolean isFlaggedAsOccluder() {
         return flagOccluder;
-    }
-
+    
     @Override
     public int getSize() {
         return 12;
