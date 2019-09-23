@@ -1,12 +1,71 @@
 package info.ata4.bsplib.util;
 
+import info.ata4.bsplib.struct.DBrushSide;
 import info.ata4.bsplib.vector.Vector2f;
+import info.ata4.bsplib.vector.Vector3f;
+import info.ata4.bspsrc.util.AreaportalMapper;
+import info.ata4.bspsrc.util.Winding;
 
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 public class VectorUtil {
+
+	/**
+	 * Returns the touching area of two Winding's in percent to w1 (0-1)
+	 *
+	 * @param w1 the areaportal this brush is compared to
+	 * @param w2 a winding representing the brush side
+	 * @return A probability in form of a double ranging from 0 to 1
+	 */
+	public static double matchingAreaPercentage(Winding w1, Winding w2) {
+
+		// Test if w1 and w2 share the same plane
+		if (!w1.isInSamePlane(w2))
+			return 0;
+
+		Vector3f[] plane = w1.buildPlane();
+		Vector3f vec1 = plane[1].sub(plane[0]);
+		Vector3f vec2 = plane[2].sub(plane[0]);
+		Vector3f planeNormal = vec2.cross(vec1).normalize();
+
+		Vector3f origin = w1.get(0);
+		Vector3f axis1 = w1.get(1).sub(origin).normalize(); //Random vector orthogonal to planeNormal
+		Vector3f axis2 = axis1.cross(planeNormal).normalize(); //Vector orthogonal to axis1 and planeNormal
+
+		//Map 3d coordinates of windings to 2d (2d coordinates on the plane they lie on)
+		List<Vector2f> apPolygon = w1.stream()
+				.map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
+				.collect(Collectors.toList());
+
+		List<Vector2f> brushSidePolygon = w2.stream()
+				.map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
+				.collect(Collectors.toList());
+
+		Set<Vector2f> intersectingVertices = new HashSet<>();
+
+		// Find all corners of w1 that are inside of w2
+		intersectingVertices.addAll(apPolygon.stream()
+				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, brushSidePolygon))
+				.collect(Collectors.toList()));
+
+		// Find all corners of w2 that are inside of w1
+		intersectingVertices.addAll(brushSidePolygon.stream()
+				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, apPolygon))
+				.collect(Collectors.toList()));
+
+		// Find all intersections of the 2 polygons
+		intersectingVertices.addAll(VectorUtil.getPolygonIntersections(apPolygon, brushSidePolygon));
+
+		// Order all vertices creating a valid convex polygon
+		List<Vector2f> intersectionPolygon = VectorUtil.orderVertices(intersectingVertices);
+
+		double intersectionArea = VectorUtil.polygonArea(intersectionPolygon);
+		double areaportalArea = VectorUtil.polygonArea(apPolygon);
+
+		return intersectionArea / areaportalArea > 1 ? 0 : Math.abs(intersectionArea / areaportalArea);
+	}
 
 	//https://wrf.ecse.rpi.edu//Research/Short_Notes/pnpoly.html
 	public static boolean isInsideConvexPolygon(Vector2f p, List<Vector2f> polygon) {
