@@ -1,9 +1,7 @@
 package info.ata4.bsplib.util;
 
-import info.ata4.bsplib.struct.DBrushSide;
 import info.ata4.bsplib.vector.Vector2f;
 import info.ata4.bsplib.vector.Vector3f;
-import info.ata4.bspsrc.util.AreaportalMapper;
 import info.ata4.bspsrc.util.Winding;
 
 import java.util.*;
@@ -35,36 +33,37 @@ public class VectorUtil {
 		Vector3f axis2 = axis1.cross(planeNormal).normalize(); //Vector orthogonal to axis1 and planeNormal
 
 		//Map 3d coordinates of windings to 2d (2d coordinates on the plane they lie on)
-		List<Vector2f> apPolygon = w1.stream()
+		List<Vector2f> w1Polygon = w1.stream()
 				.map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
 				.collect(Collectors.toList());
 
-		List<Vector2f> brushSidePolygon = w2.stream()
+		List<Vector2f> w2Polygon = w2.stream()
 				.map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
 				.collect(Collectors.toList());
 
 		Set<Vector2f> intersectingVertices = new HashSet<>();
 
 		// Find all corners of w1 that are inside of w2
-		intersectingVertices.addAll(apPolygon.stream()
-				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, brushSidePolygon))
+		intersectingVertices.addAll(w1Polygon.stream()
+				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, w2Polygon))
 				.collect(Collectors.toList()));
 
 		// Find all corners of w2 that are inside of w1
-		intersectingVertices.addAll(brushSidePolygon.stream()
-				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, apPolygon))
+		intersectingVertices.addAll(w2Polygon.stream()
+				.filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, w1Polygon))
 				.collect(Collectors.toList()));
 
 		// Find all intersections of the 2 polygons
-		intersectingVertices.addAll(VectorUtil.getPolygonIntersections(apPolygon, brushSidePolygon));
+		intersectingVertices.addAll(VectorUtil.getPolygonIntersections(w1Polygon, w2Polygon));
 
 		// Order all vertices creating a valid convex polygon
 		List<Vector2f> intersectionPolygon = VectorUtil.orderVertices(intersectingVertices);
 
 		double intersectionArea = VectorUtil.polygonArea(intersectionPolygon);
-		double areaportalArea = VectorUtil.polygonArea(apPolygon);
+		double w1Area = VectorUtil.polygonArea(w1Polygon);
 
-		return intersectionArea / areaportalArea > 1 ? 0 : Math.abs(intersectionArea / areaportalArea);
+		// actually intersectionArea / w1Area should never be greater 1, but i don't know why I have written that, so im just gonna leave that here
+		return intersectionArea / w1Area > 1 ? 0 : Math.abs(intersectionArea / w1Area);
 	}
 
 	//https://wrf.ecse.rpi.edu//Research/Short_Notes/pnpoly.html
