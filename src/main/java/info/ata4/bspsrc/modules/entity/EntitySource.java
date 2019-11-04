@@ -18,7 +18,8 @@ import info.ata4.bsplib.entity.KeyValue;
 import info.ata4.bsplib.nmo.NmoFile;
 import info.ata4.bsplib.struct.*;
 import info.ata4.bsplib.vector.Vector3f;
-import info.ata4.bspsrc.*;
+import info.ata4.bspsrc.BspSourceConfig;
+import info.ata4.bspsrc.VmfWriter;
 import info.ata4.bspsrc.modules.BspProtection;
 import info.ata4.bspsrc.modules.ModuleDecompile;
 import info.ata4.bspsrc.modules.VmfMeta;
@@ -36,8 +37,6 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-
-import static info.ata4.bsplib.app.SourceAppID.COUNTER_STRIKE_GO;
 
 /**
  * Decompiling module to write point and brush entities converted from various lumps.
@@ -62,10 +61,12 @@ public class EntitySource extends ModuleDecompile {
     private final VmfMeta vmfmeta;
 
     // Areaportal to brush mapping
-    Map<Integer, Integer> apBrushMap;
+    private AreaportalMapper areaportalMapper;
+    private Map<Integer, Integer> apBrushMap;
 
     // Occluder to brushes mapping;
-    Map<Integer, List<Integer>> occBrushesMap;
+    private OccluderMapper occluderMapper;
+    private Map<Integer, Set<Integer>> occBrushesMap;
 
     //'No More Room in Hell' Nmo data
     private NmoFile nmo;
@@ -86,11 +87,14 @@ public class EntitySource extends ModuleDecompile {
 
         processEntities();
 
-        AreaportalMapper areaportalMapper = new AreaportalMapper(bsp, config);
+        areaportalMapper = new AreaportalMapper(bsp, config);
         apBrushMap = areaportalMapper.getApBrushMapping();
 
-        OccluderMapper occluderMapper = new OccluderMapper(bsp, config);
+        occluderMapper = new OccluderMapper(bsp, config);
         occBrushesMap = occluderMapper.getOccBrushMapping();
+
+        // Because the Texturebuilder needs to know which brush is a occluder we flag them here. (The Texturebuilder needs to know this information, because the brushside that represents the occluder has almost always the wrong tooltexture applied, which we need to fix)
+        occBrushesMap.values().forEach(brushIndexes -> brushIndexes.forEach(index -> bsp.brushes.get(index).flagAsOccluder(true)));
     }
 
     /**
@@ -187,25 +191,6 @@ public class EntitySource extends ModuleDecompile {
                 }
             }
 
-            // re-use hammerid if possible, otherwise generate a new UID
-            int entID = getHammerID(ent);
-
-            // if we have nmo data re-use extractions ids
-            if (nmo != null) {
-                entID = nmo.extractions.stream()
-                        .filter(extraction -> extraction.name.equals(ent.getTargetName()))
-                        .findAny()
-                        .map(extraction -> extraction.id)
-                        .orElse(entID);
-            }
-
-            if (entID == -1) {
-                entID = vmfmeta.getUID();
-            }
-
-            writer.start("entity");
-            writer.put("id", entID);
-
             // get areaportal numbers
             int portalNum = -1;
             if (isAreaportal) {
@@ -217,6 +202,12 @@ public class EntitySource extends ModuleDecompile {
                         portalNum = Integer.valueOf(portalNumString);
                     } catch (NumberFormatException ex) {
                         portalNum = -1;
+                    }
+
+                    int finalPortalNum = portalNum;
+                    if (bsp.areaportals.stream().noneMatch(areaportal -> areaportal.portalKey == finalPortalNum)) {
+                        L.warning("funct_areaportal entity links to a non existing areaportal, skipping...");
+                        continue;
                     }
 
                     // keep the number when debugging
@@ -245,6 +236,25 @@ public class EntitySource extends ModuleDecompile {
                     }
                 }
             }
+
+            // re-use hammerid if possible, otherwise generate a new UID
+            int entID = getHammerID(ent);
+
+            // if we have nmo data re-use extractions ids
+            if (nmo != null) {
+                entID = nmo.extractions.stream()
+                        .filter(extraction -> extraction.name.equals(ent.getTargetName()))
+                        .findAny()
+                        .map(extraction -> extraction.id)
+                        .orElse(entID);
+            }
+
+            if (entID == -1) {
+                entID = vmfmeta.getUID();
+            }
+
+            writer.start("entity");
+            writer.put("id", entID);
 
             int modelNum = ent.getModelNum();
 
@@ -319,6 +329,10 @@ public class EntitySource extends ModuleDecompile {
                         facesrc.writeAreaportal(portalNum);
                         visgroups.add("Rebuild" + VmfMeta.VISGROUP_SEPERATOR + "areaportals");
                     }
+
+                    if (config.isDebug()) {
+                        visgroups.add("AreaportalID" + VmfMeta.VISGROUP_SEPERATOR + portalNum);
+                    }
                 }
 
                 // retrieve occluder brushes from map
@@ -370,6 +384,11 @@ public class EntitySource extends ModuleDecompile {
             }
 
             writer.end("entity");
+        }
+
+        //If were in debug wer write some additional entities
+        if (config.isDebug()) {
+            areaportalMapper.writeDebugPortals(writer, vmfmeta, facesrc);
         }
     }
 
@@ -630,15 +649,7 @@ public class EntitySource extends ModuleDecompile {
             writer.put("fademaxdist", pst4.fademax);
             writer.put("solid", pst4.solid);
             writer.put("model", bsp.staticPropName.get(pst4.propType));
-
-            //Csgo no longer uses the screenspacefade flag for 'Screen space fade' but for 'Render in fastreflection'
-            if (pst4.hasScreenSpaceFadeInPixels()) {
-                if (bspFile.getSourceApp().getAppID() == COUNTER_STRIKE_GO) {
-                    writer.put("drawinfastreflection", pst4.hasScreenSpaceFadeInPixels());
-                } else {
-                    writer.put("screenspacefade", pst4.hasScreenSpaceFadeInPixels());
-                }
-            }
+            writer.put("screenspacefade", pst4.hasScreenSpaceFadeInPixels());
 
             // store coordinates and targetname of the lighing origin for later
             if (pst4.usesLightingOrigin()) {
@@ -668,6 +679,10 @@ public class EntitySource extends ModuleDecompile {
                 writer.put("maxdxlevel", pst6.maxDXLevel);
                 writer.put("mindxlevel", pst6.minDXLevel);
                 writer.put("ignorenormals", pst6.hasIgnoreNormals());
+            }
+
+            if (pst instanceof DStaticPropV6VIN) {
+                writer.put("scale", ((DStaticPropV6VIN) pst).scaling);
             }
 
             // write that later; both v7 and v8 have it, but v8 extends v5
@@ -722,6 +737,10 @@ public class EntitySource extends ModuleDecompile {
                             diffMod.r, diffMod.g, diffMod.b));
                     writer.put("renderamt", diffMod.a);
                 }
+            }
+
+            if (pst instanceof DStaticPropV10CSGO) {
+                writer.put("drawinfastreflection", ((DStaticPropV10CSGO) pst).hasRenderInFastReflection());
             }
 
             if (pst instanceof DStaticPropV11CSGO) {
