@@ -1,18 +1,21 @@
 package info.ata4.bspsrc.util;
 
+import info.ata4.bsplib.entity.Entity;
 import info.ata4.bsplib.struct.BspData;
 import info.ata4.bsplib.struct.DAreaportal;
 import info.ata4.bsplib.struct.DBrush;
-import info.ata4.bsplib.struct.DBrushSide;
 import info.ata4.bsplib.util.VectorUtil;
-import info.ata4.bsplib.vector.Vector2f;
-import info.ata4.bsplib.vector.Vector3f;
 import info.ata4.bspsrc.BspSourceConfig;
+import info.ata4.bspsrc.VmfWriter;
+import info.ata4.bspsrc.modules.VmfMeta;
+import info.ata4.bspsrc.modules.geom.FaceSource;
+import info.ata4.bspsrc.modules.texture.ToolTexture;
 import info.ata4.log.LogUtils;
 
 import java.util.*;
 import java.util.Map.Entry;
 import java.util.function.Function;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -106,20 +109,21 @@ public class AreaportalMapper {
         Map<DBrush, Map<AreaportalHelper, Double>> brushProbMapping = areaportalBrushes.stream()
                 .collect(Collectors.toMap(dBrush -> dBrush, this::areaportalBrushProb));
 
-//        Map<Integer, Set<Integer>> debug = brushProbMapping.entrySet().stream()
-//                .map(entry -> new AbstractMap.SimpleEntry<Integer, Set<Integer>>(areaportalBrushes.indexOf(entry.getKey()), entry.getValue().entrySet().stream()
-//                        .max(Comparator.comparingDouble(Entry::getValue))
-//                        .map(apEntry -> apEntry.getKey().portalID)
-//                        .orElse(null)))
-//                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
         // Remove every brush entry if it doesn't have areaportals mapped to it. (Not sure if this could actually happen here)
         brushProbMapping.entrySet().removeIf(dBrushMapEntry -> dBrushMapEntry.getValue().isEmpty());
 
         // Final brush mapping. Key represent areaportal ids, values represent index in bsp.brushes
         HashMap<Integer, Integer> brushMapping = new HashMap<>();
+
+        Map<DBrush, Map<AreaportalHelper, Double>> mappingQueue = new HashMap<>();
+        Comparator<Entry<DBrush, Map<AreaportalHelper, Double>>> mappingQueueComparator = Comparator.comparingDouble(entry -> entry.getValue().entrySet().stream()
+                .max(Comparator.comparingDouble(Entry::getValue))
+                .map(Entry::getValue)
+                .get());
+
         while (!brushProbMapping.isEmpty()) {
-            TreeMap<DBrush, Map<AreaportalHelper, Double>> mappingQueue = new TreeMap<>(Comparator.comparingInt(areaportalBrushes::indexOf));
+            // Clear our mapping queue before every iteration
+            mappingQueue.clear();
 
             // Get all brush mappings that only have one available areaportal to map to. These can be safely mapped as they don't create conflicts with other areaportal brushes (At least they shouldn't theoretically)
             mappingQueue.putAll(brushProbMapping.entrySet().stream()
@@ -129,38 +133,75 @@ public class AreaportalMapper {
             if (mappingQueue.isEmpty()) {
                 // We ended up with only brushes that can't be mapped distinctively so we guess one to map by using the mapping with the highest probability
                 brushProbMapping.entrySet().stream()
-                        .max(Comparator.comparingDouble(entry -> entry.getValue().entrySet().stream()
-                                .max(Comparator.comparingDouble(Entry::getValue))
-                                .map(Entry::getValue)
-                                .orElseThrow(RuntimeException::new)))
+                        .max(mappingQueueComparator)
                         .ifPresent(entry -> mappingQueue.put(entry.getKey(), entry.getValue()));
             }
 
             // Now mapped those brushes we selected earlier
-            for (Entry<DBrush, Map<AreaportalHelper, Double>> entry : mappingQueue.entrySet()) {
-                DBrush dBrush = entry.getKey();
-                Map<AreaportalHelper, Double> apHelperProbMap = entry.getValue();
+            mappingQueue.entrySet().stream()
+                    .sorted(mappingQueueComparator)
+                    .forEachOrdered(entry -> {
+                        DBrush dBrush = entry.getKey();
+                        AreaportalHelper apHelper = entry.getValue().entrySet().stream()
+                                .max(Comparator.comparingDouble(Entry::getValue))
+                                .map(Entry::getKey)
+                                .get();
 
-                if (!apHelperProbMap.isEmpty()) {
-                    AreaportalHelper apHelper = apHelperProbMap.keySet().iterator().next();
-                    int portalID = apHelper.portalID.first();
+                        if (!apHelper.portalID.isEmpty()) {
+                            int portalID = apHelper.portalID.first();
 
-                    // When we map a brush to the specific areaportal id, we need to make sure no other brush is mapped to it as well. -> Iterate over every brush mapping and remove the areaportal id if present
-                    brushProbMapping.entrySet().stream()
-                            .flatMap(dBrushMapEntry -> dBrushMapEntry.getValue().keySet().stream())
-                            .forEach(areaportalHelper -> areaportalHelper.portalID.removeIf(integer -> integer == portalID));
+                            // When we map a brush to the specific areaportal id, we need to make sure no other brush is mapped to it as well. -> Iterate over every brush mapping and remove the areaportal id if present
+                            brushProbMapping.entrySet().stream()
+                                    .flatMap(dBrushMapEntry -> dBrushMapEntry.getValue().keySet().stream())
+                                    .forEach(areaportalHelper -> areaportalHelper.portalID.removeIf(integer -> integer == portalID));
 
-                    // This could cause Areaportalhelpers to be empty (of portal ids), so we remove every entry with those
-                    brushProbMapping.forEach((key, value) -> value.entrySet().removeIf(apEntry -> apEntry.getKey().portalID.isEmpty()));
+                            // This could cause Areaportalhelpers to be empty (of portal ids), so we remove every entry with those
+                            brushProbMapping.forEach((key, value) -> value.entrySet().removeIf(apEntry -> apEntry.getKey().portalID.isEmpty()));
 
-                    // Finally put our new mapping in the map
-                    brushMapping.put(portalID, bsp.brushes.indexOf(dBrush));
-                }
-                brushProbMapping.remove(dBrush);
-            }
+                            // Finally put our new mapping in the map
+                            brushMapping.put(portalID, bsp.brushes.indexOf(dBrush));
+                        } else {
+                            L.warning("Couldn't find valid Areaportal mapping for brush " + bsp.brushes.indexOf(dBrush));
+                        }
 
-            // After every iteration we remove every entry that doesn't have a possible entry anymore. (This could for example happen if the algorithm makes mistake)
+                        brushProbMapping.remove(dBrush);
+                    });
+
+            // After each iteration we remove every entry that doesn't have a possible entry anymore. (This could for example happen if the algorithm makes mistake)
             brushProbMapping.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+        }
+
+        //In debug mode we write all probabilities to the entities for debugging
+        if (config.isDebug()) {
+            //We create a new copy of the porbability map. This is very inefficient, but necessary with the current structure of the algorithm because brushProbMapping is being altered while assigning to areaportals
+            Map<DBrush, Map<AreaportalHelper, Double>> debugBrushProbMapping = areaportalBrushes.stream()
+                    .collect(Collectors.toMap(dBrush -> dBrush, this::areaportalBrushProb));
+
+            for (Entity entity : bsp.entities) {
+                if (!entity.getClassName().startsWith("func_areaportal"))
+                    continue;
+
+                try {
+                    Integer brushIndex = brushMapping.get(Integer.valueOf(entity.getValue("portalnumber")));
+                    if (brushIndex == null)
+                        continue;
+
+                    DBrush brush = bsp.brushes.get(brushIndex);
+                    Map<AreaportalHelper, Double> probabilities = debugBrushProbMapping.get(brush);
+
+                    if (probabilities == null)
+                        continue;
+
+                    probabilities.forEach((areaportal, percentage) -> entity.setValue(
+                            "areaportalProb" + areaportal.portalID.stream()
+                                    .map(Object::toString)
+                                    .collect(Collectors.joining(", ", "[", "]")),
+                            percentage
+                    ));
+                } catch (NumberFormatException e) {
+                    L.log(Level.FINE, "func_areaportal portalnumber property is missing or invalid", e);
+                }
+            }
         }
 
         return brushMapping;
@@ -173,68 +214,12 @@ public class AreaportalMapper {
      * @return A {@code Map} with <b>copys</b> of {@link AreaportalHelper}'s as keys and and a percantage(0 < p <= 1) as likelihood
      */
     private Map<AreaportalHelper, Double> areaportalBrushProb(DBrush dBrush) {
-        return IntStream.range(0, dBrush.numside)
-                .boxed()
-                .flatMap(side -> areaportalHelpers.stream()
-                        .map(apHelper -> new AbstractMap.SimpleEntry<>(new AreaportalHelper(apHelper), areaportalBrushSideProb(apHelper, WindingFactory.fromSide(bsp, dBrush, side))))
-                        .filter(entry -> entry.getValue() != 0))
+        return bsp.brushSides.subList(dBrush.fstside, dBrush.fstside + dBrush.numside).stream()
+                .flatMap(brushSide -> areaportalHelpers.stream()
+                        .map(apHelper -> new AbstractMap.SimpleEntry<>(new AreaportalHelper(apHelper), VectorUtil.matchingAreaPercentage(apHelper.getFirstDAreaportal(), dBrush, brushSide, bsp)))
+                        .filter(entry -> entry.getValue() != 0)
+                )
                 .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
-    }
-
-    /**
-     * Returns the probability that the specified {@link DBrushSide} represents the specified {@link AreaportalHelper}
-     *
-     * @param areaportalHelper the areaportal this brush is compared to
-     * @param brushSideWinding a winding representing the brush side
-     * @return A probability in form of a double ranging from 0 to 1
-     */
-    private double areaportalBrushSideProb(AreaportalHelper areaportalHelper, Winding brushSideWinding) {
-        Winding apWinding = areaportalHelper.winding;
-
-        // Test if apWinding and brushSideWinding share the same plane
-        if (!apWinding.isInSamePlane(brushSideWinding))
-            return 0;
-
-        Vector3f[] plane = apWinding.buildPlane();
-        Vector3f vec1 = plane[1].sub(plane[0]);
-        Vector3f vec2 = plane[2].sub(plane[0]);
-        Vector3f planeNormal = vec2.cross(vec1).normalize();
-
-        Vector3f origin = apWinding.get(0);
-        Vector3f axis1 = apWinding.get(1).sub(origin).normalize(); //Random vector orthogonal to planeNormal
-        Vector3f axis2 = axis1.cross(planeNormal).normalize(); //Vector orthogonal to axis1 and planeNormal
-
-        //Map 3d coordinates of windings to 2d (2d coordinates on the plane they lie on)
-        List<Vector2f> apPolygon = apWinding.stream()
-                .map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
-                .collect(Collectors.toList());
-
-        List<Vector2f> brushSidePolygon = brushSideWinding.stream()
-                .map(vertex -> vertex.getAsPointOnPlane(origin, axis1, axis2))
-                .collect(Collectors.toList());
-
-        Set<Vector2f> intersectingVertices = new HashSet<>();
-
-        // Find all corners of apWinding that are inside of brushSideWinding
-        intersectingVertices.addAll(apPolygon.stream()
-                .filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, brushSidePolygon))
-                .collect(Collectors.toList()));
-
-        // Find all corners of brushSideWinding that are inside of apWinding
-        intersectingVertices.addAll(brushSidePolygon.stream()
-                .filter(vertex -> VectorUtil.isInsideConvexPolygon(vertex, apPolygon))
-                .collect(Collectors.toList()));
-
-        // Find all intersections of the 2 polygons
-        intersectingVertices.addAll(VectorUtil.getPolygonIntersections(apPolygon, brushSidePolygon));
-
-        // Order all vertices creating a valid convex polygon
-        List<Vector2f> intersectionPolygon = VectorUtil.orderVertices(intersectingVertices);
-
-        double intersectionArea = VectorUtil.polygonArea(intersectionPolygon);
-        double areaportalArea = VectorUtil.polygonArea(apPolygon);
-
-        return intersectionArea / areaportalArea > 1 ? 0 : Math.abs(intersectionArea / areaportalArea);
     }
 
     private Map<Integer, Integer> orderedMapping() {
@@ -259,21 +244,47 @@ public class AreaportalMapper {
      *
      * @return A {@code Map} where the keys represent portal ids and values the brush ids
      */
-    public Map<Integer,Integer> getApBrushMapping() {
+    public Map<Integer, Integer> getApBrushMapping() {
         if (!config.writeAreaportals)
             return Collections.emptyMap();
 
-        if (config.apForceMapping) {
-            L.info("Forced areaportal method: '" + config.apMappingMode + "'");
-            return config.apMappingMode.map(this);
+        if (areaportalHelpers.size() == 0) {
+            L.info("No areaportals to reallocate...");
+            return Collections.emptyMap();
+        }
+
+        if (config.apForceManualMapping) {
+            L.info("Forced manual areaportal mapping method");
+            return ApMappingMode.MANUAL.map(this);
         }
 
         if (areaportalHelpers.stream().mapToInt(value -> value.portalID.size()).sum() == bsp.brushes.stream().filter(DBrush::isAreaportal).count()) {
-            L.info("Equal amount of areaporal entities as areaportal brushes. Using '" + ApMappingMode.ORDERED + "' method");
+            L.info("Equal amount of areaporal entities and areaportal brushes. Using '" + ApMappingMode.ORDERED + "' method");
             return ApMappingMode.ORDERED.map(this);
         } else {
-            L.info("Unequal amount of areaporal entities as areaportal brushes. Falling back to '" + ApMappingMode.MANUAL + "' method");
+            L.info("Unequal amount of areaporal entities and areaportal brushes. Falling back to '" + ApMappingMode.MANUAL + "' method");
             return ApMappingMode.MANUAL.map(this);
+        }
+    }
+
+    /**
+     * Writes debug entities, that represent the original areaportals from the bsp
+     */
+    public void writeDebugPortals(VmfWriter writer, VmfMeta vmfMeta, FaceSource faceSource) {
+        for (AreaportalHelper areaportalHelper : areaportalHelpers) {
+            writer.start("entity");
+            writer.put("id", vmfMeta.getUID());
+            writer.put("classname", "func_detail");
+            writer.put("areaportalIDs", areaportalHelper.portalID.stream().map(Object::toString).collect(Collectors.joining(", ")));
+
+            faceSource.writePolygon(areaportalHelper.winding, ToolTexture.SKIP, true);
+            vmfMeta.writeMetaVisgroups(
+                    areaportalHelper.portalID.stream()
+                            .map(id -> "AreaportalID" + VmfMeta.VISGROUP_SEPERATOR +  id)
+                            .collect(Collectors.toList())
+            );
+
+            writer.end("entity");
         }
     }
 
@@ -302,7 +313,8 @@ public class AreaportalMapper {
      */
     private class AreaportalHelper {
 
-        public TreeSet<Integer> portalID = new TreeSet<>();         //All areaportal entities assigned to this helper. All areaportals are sorted by their portalID!
+        //All areaportal entities assigned to this helper. All areaportals are sorted by their portalID!
+        public final TreeSet<Integer> portalID = new TreeSet<>();
         public Winding winding;
 
         public AreaportalHelper() {}
@@ -310,6 +322,31 @@ public class AreaportalMapper {
         public AreaportalHelper(AreaportalHelper apHelper) {
             portalID.addAll(apHelper.portalID);
             winding = apHelper.winding;
+        }
+
+        public DAreaportal getFirstDAreaportal() {
+            return bsp.areaportals.stream()
+                    .filter(areaportal -> areaportal.portalKey == portalID.first())
+                    .findAny()
+                    .orElseThrow(() -> new RuntimeException("Areaportalhelper points to non existing dAreaportal " + portalID.first()));
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+
+            AreaportalHelper that = (AreaportalHelper) o;
+
+            if (!portalID.equals(that.portalID)) return false;
+            return Objects.equals(winding, that.winding);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = portalID.hashCode();
+            result = 31 * result + (winding != null ? winding.hashCode() : 0);
+            return result;
         }
     }
 }
